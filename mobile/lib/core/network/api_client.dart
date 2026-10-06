@@ -55,7 +55,16 @@ class ApiClient {
     String path, [
     Map<String, dynamic>? query,
   ]) async {
-    return _send(() => _client.get(_uri(path, query), headers: _headers()));
+    return _asMap(await _send(() => _client.get(_uri(path, query), headers: _headers())));
+  }
+
+  /// For endpoints that answer with a JSON array, such as `GET /classes` and
+  /// `GET /students/{id}/parents`.
+  Future<List<dynamic>> getList(
+    String path, [
+    Map<String, dynamic>? query,
+  ]) async {
+    return _asList(await _send(() => _client.get(_uri(path, query), headers: _headers())));
   }
 
   Future<Map<String, dynamic>> post(
@@ -63,11 +72,13 @@ class ApiClient {
     Map<String, dynamic> body, [
     Map<String, dynamic>? query,
   ]) async {
-    return _send(
-      () => _client.post(
-        _uri(path, query),
-        headers: _headers(),
-        body: jsonEncode(body),
+    return _asMap(
+      await _send(
+        () => _client.post(
+          _uri(path, query),
+          headers: _headers(),
+          body: jsonEncode(body),
+        ),
       ),
     );
   }
@@ -77,11 +88,13 @@ class ApiClient {
     Map<String, dynamic> body, [
     Map<String, dynamic>? query,
   ]) async {
-    return _send(
-      () => _client.patch(
-        _uri(path, query),
-        headers: _headers(),
-        body: jsonEncode(body),
+    return _asMap(
+      await _send(
+        () => _client.patch(
+          _uri(path, query),
+          headers: _headers(),
+          body: jsonEncode(body),
+        ),
       ),
     );
   }
@@ -90,11 +103,20 @@ class ApiClient {
     await _send(() => _client.delete(_uri(path, query), headers: _headers()));
   }
 
-  Future<Map<String, dynamic>> _send(Future<http.Response> Function() call) async {
+  Map<String, dynamic> _asMap(dynamic decoded) =>
+      decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
+
+  List<dynamic> _asList(dynamic decoded) => decoded is List ? decoded : const <dynamic>[];
+
+  Future<dynamic> _send(Future<http.Response> Function() call) async {
     final http.Response response;
     try {
       response = await call().timeout(const Duration(seconds: 15));
     } on SocketException {
+      throw ApiException(0, 'Could not reach the SchoolPulse server.');
+    } on http.ClientException {
+      // DNS failure, refused connection, dropped socket: a connectivity problem
+      // rather than a server answer, so it must not read as a server error.
       throw ApiException(0, 'Could not reach the SchoolPulse server.');
     } on TimeoutException {
       throw ApiException(0, 'The server took too long to respond.');
@@ -102,13 +124,10 @@ class ApiClient {
 
     final dynamic decoded = response.body.isEmpty
         ? <String, dynamic>{}
-        : jsonDecode(response.body);
+        : _tryDecode(response.body);
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
-      if (decoded is Map<String, dynamic>) {
-        return decoded;
-      }
-      return <String, dynamic>{};
+      return decoded;
     }
 
     throw ApiException(
@@ -117,13 +136,57 @@ class ApiClient {
     );
   }
 
+  /// A non-JSON error body (a proxy error page, for instance) must not crash the
+  /// app; it is simply treated as having no detail.
+  dynamic _tryDecode(String body) {
+    try {
+      return jsonDecode(body);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// Flattens FastAPI's error shapes into one readable line.
+  ///
+  /// A plain `detail` string is used as-is. A 422 sends a list of field errors,
+  /// each with a `loc`/`msg` pair, which is reduced to "field: message" so the
+  /// person filling in the form learns which field is wrong.
   String? _extractDetail(dynamic body) {
-    if (body is Map<String, dynamic>) {
-      final detail = body['detail'];
-      if (detail is String) {
-        return detail;
+    if (body is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final dynamic detail = body['detail'];
+    if (detail is String) {
+      return detail;
+    }
+
+    if (detail is List && detail.isNotEmpty) {
+      final messages = <String>[];
+      for (final item in detail) {
+        if (item is Map<String, dynamic>) {
+          final message = item['msg'];
+          if (message is! String) {
+            continue;
+          }
+          // `loc` is like ["body", "first_name"]; the field name is the last
+          // entry, and list indices are noise in a form.
+          final location = item['loc'];
+          String field = '';
+          if (location is List && location.isNotEmpty) {
+            final last = location.last;
+            if (last is String && last != 'body' && last != 'query') {
+              field = last.replaceAll('_', ' ');
+            }
+          }
+          messages.add(field.isEmpty ? message : '$field: $message');
+        }
+      }
+      if (messages.isNotEmpty) {
+        return messages.join('\n');
       }
     }
+
     return null;
   }
 }

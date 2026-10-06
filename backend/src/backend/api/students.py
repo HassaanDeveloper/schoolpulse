@@ -16,46 +16,22 @@ from backend.db.models import Student as StudentModel
 from backend.db.models import StudentStatusEnum
 from backend.db.session import get_db
 from backend.schemas.student import StudentCreate, StudentPage, StudentRead, StudentUpdate
+from backend.services.school_access import (
+    accessible_school_ids,
+    resolve_school_id,
+)
 
 router = APIRouter()
 
 MAX_PAGE_SIZE = 100
 
 
-def accessible_school_ids(db: Session, user: AuthenticatedUser) -> list[uuid.UUID]:
-    if user.profile is None:
-        return []
-    return [m.school_id for m in user.profile.memberships]
-
-
-def resolve_school_id(
-    db: Session,
-    user: AuthenticatedUser,
-    school_id: uuid.UUID | None,
-) -> uuid.UUID:
-    if school_id is None:
-        ids = accessible_school_ids(db, user)
-        if not ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not belong to any school.",
-            )
-        if len(ids) > 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="You belong to multiple schools. Specify school_id.",
-            )
-        return ids[0]
-
-    if school_id not in accessible_school_ids(db, user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this school.",
-        )
-    return school_id
-
-
 def get_class_in_school(db: Session, class_id: uuid.UUID, school_id: uuid.UUID) -> ClassModel:
+    """Day 2 behaviour: a cross-school class is a validation error (422).
+
+    Kept distinct from `school_access.resolve_class`, which reports any
+    out-of-scope class as missing (404) for the Day 4 read-only endpoints.
+    """
     row = db.query(ClassModel).filter(ClassModel.id == class_id).one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found.")

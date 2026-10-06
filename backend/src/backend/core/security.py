@@ -121,3 +121,24 @@ def require_teacher_or_admin(
             detail="Teacher or school administrator privileges are required.",
         )
     return user
+
+
+def require_parent(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    """Day 5: guard for the parent self-service endpoints.
+
+    The parent routes live under `/me`, which every authenticated user can
+    read, so the role has to be re-checked here. A staff-only account must get
+    403 rather than silently receiving empty parent data.
+    """
+    profile = require_profile(user)
+    has_parent = profile.memberships is not None and any(
+        m.role == RoleEnum.parent for m in profile.memberships
+    )
+    if not has_parent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Parent privileges are required.",
+        )
+    return user

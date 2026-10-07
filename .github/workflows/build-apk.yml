@@ -17,7 +17,9 @@ jobs:
           channel: stable
           cache: true
       - name: Remove machine-specific Java path
-              run: sed -i '/^org.gradle.java.home/d' mobile/android/gradle.properties
+        run: |
+          sed -i '/org.gradle.java.home/d' mobile/android/gradle.properties
+          grep -n "java.home" mobile/android/gradle.properties || echo "java.home removed"
       - name: Build release APK
         working-directory: mobile
         env:

@@ -16,6 +16,8 @@ jobs:
           flutter-version: '3.35.6'
           channel: stable
           cache: true
+      - name: Remove machine-specific Java path
+              run: sed -i '/^org.gradle.java.home/d' mobile/android/gradle.properties
       - name: Build release APK
         working-directory: mobile
         env:

@@ -1,35 +1,40 @@
-"""Day 7: prepare a fictional demonstration environment.
+"""Prepare a fictional demonstration environment (LOCAL DEVELOPMENT TOOL).
 
-This is a LOCAL DEVELOPMENT TOOL. It is a script, not an HTTP endpoint: there
-is no `/seed`, `/demo-login` or `/create-admin-without-auth` route anywhere in
-the application, so it cannot be triggered over the network in production.
+This is a script, not an HTTP endpoint: there is no `/seed`, `/demo-login` or
+`/create-admin-without-auth` route anywhere in the application, so it cannot
+be triggered over the network in production.
 
 Safety rules enforced here:
 
-* it refuses to run unless DATABASE_URL names a database the operator has
-  explicitly opted in as a demo database, or `--allow-remote-demo-db` is
-  passed with the schema name spelled out;
-* it only ever creates or updates rows carrying the demo marker, so running it
-  cannot damage unrelated data;
-* it creates fictional people only. No real child's name, phone number or
-  address is written.
+* it refuses to write to a hosted PostgreSQL database unless the operator
+  passes `--allow-remote-demo-db` AND `--confirm-demo-database <name>`;
+* it only creates or updates the fictional demo rows (school, class, student,
+  profiles, memberships, parent link); it never deletes anything except the
+  demo student's attendance when `--reset` is passed;
+* on PostgreSQL it never creates tables. Alembic is the only schema source of
+  truth, so run `alembic upgrade head` first.
 
-Usage (local only):
+Real user accounts are created in Supabase Auth (Authentication > Users). This
+script creates the application-side rows for them, using the Supabase user ids
+you supply through environment variables.
 
-    python prepare_demo.py --database-url sqlite:///./demo.db
-    python prepare_demo.py --reset          # wipe demo rows, keep the accounts
+Windows (cmd) example, run from the folder that contains pyproject.toml:
 
-Supabase note: the application's own tables live in the `auth` schema managed
-by Supabase. Real user accounts must therefore be created through Supabase
-Auth; this script creates the application-side rows (profiles, memberships,
-classes, students, parent links) and prints the auth ids it expects.
+    set PYTHONPATH=src;.
+    set DEMO_ADMIN_AUTH_ID=<User UID from Supabase>
+    set DEMO_ADMIN_EMAIL=<the email you signed in with>
+    python prepare_demo.py --allow-remote-demo-db --confirm-demo-database postgres
+
+Optional extras: DEMO_TEACHER_AUTH_ID / DEMO_TEACHER_EMAIL and
+DEMO_PARENT_AUTH_ID / DEMO_PARENT_EMAIL. Roles without an id are skipped.
 """
 
 import argparse
 import os
 import sys
+import uuid
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.core.config import settings
@@ -52,28 +57,41 @@ DEMO_SECTION = "A"
 DEMO_ADMISSION = "SP-DEMO-001"
 DEMO_STUDENT_FIRST = "Ali"
 DEMO_STUDENT_LAST = "Khan"
-DEMO_PARENT_EMAIL = "demo.parent@example.test"
-DEMO_ADMIN_EMAIL = "demo.admin@example.test"
-DEMO_TEACHER_EMAIL = "demo.teacher@example.test"
 
-# Every demo row carries this marker so cleanup is exact and never overreaches.
+DEMO_PARENT_EMAIL = os.environ.get("DEMO_PARENT_EMAIL", "demo.parent@example.test")
+DEMO_ADMIN_EMAIL = os.environ.get("DEMO_ADMIN_EMAIL", "demo.admin@example.test")
+DEMO_TEACHER_EMAIL = os.environ.get("DEMO_TEACHER_EMAIL", "demo.teacher@example.test")
+
 DEMO_MARKER = "schoolpulse-demo-v1"
 
-# auth_user_id values are supplied by the operator after creating the accounts
-# in Supabase Auth. They are not secrets; they are identifiers.
+# auth_user_id values are the "User UID" shown in Supabase > Authentication >
+# Users. They are identifiers, not secrets.
 AUTH_USERS = {
     "admin": os.environ.get("DEMO_ADMIN_AUTH_ID", "demo-admin-auth-id"),
     "teacher": os.environ.get("DEMO_TEACHER_AUTH_ID", "demo-teacher-auth-id"),
     "parent": os.environ.get("DEMO_PARENT_AUTH_ID", "demo-parent-auth-id"),
 }
+PROVIDED_AUTH_IDS = {
+    "admin": bool(os.environ.get("DEMO_ADMIN_AUTH_ID")),
+    "teacher": bool(os.environ.get("DEMO_TEACHER_AUTH_ID")),
+    "parent": bool(os.environ.get("DEMO_PARENT_AUTH_ID")),
+}
+
+
+def normalize_database_url(database_url: str) -> str:
+    """Use the psycopg (v3) driver for PostgreSQL URLs."""
+    if database_url.startswith("postgres://"):
+        return "postgresql+psycopg://" + database_url[len("postgres://"):]
+    if database_url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + database_url[len("postgresql://"):]
+    return database_url
 
 
 def require_demo_database(database_url: str, allow_remote: bool) -> None:
     """Refuse to write to a database the operator has not designated as demo."""
-    is_sqlite = database_url.startswith("sqlite")
-    if is_sqlite:
+    if database_url.startswith("sqlite"):
         return
-    if not database_url.startswith(("postgresql://", "postgres://")):
+    if not database_url.startswith(("postgresql", "postgres")):
         raise SystemExit(f"Refusing to use an unrecognised DATABASE_URL: {database_url[:12]}...")
     if not allow_remote:
         raise SystemExit(
@@ -95,11 +113,7 @@ def confirm_database_name(database_url: str, expected: str) -> None:
 
 
 def upsert_school(db, timezone_name: str = DEMO_TIMEZONE) -> School:
-    school = (
-        db.query(School)
-        .filter(School.name == DEMO_SCHOOL)
-        .one_or_none()
-    )
+    school = db.query(School).filter(School.name == DEMO_SCHOOL).one_or_none()
     if school is None:
         school = School(
             name=DEMO_SCHOOL,
@@ -206,12 +220,12 @@ def upsert_parent_link(db, student: Student, parent: UserProfile, school: School
         db.commit()
 
 
-def reset_demo_attendance(db, student: Student) -> None:
+def reset_demo_attendance(db, student: Student) -> int:
     """Return the demo student to 'not scanned today' so the demo can be repeated.
 
     Only this student's rows are touched. Notifications created by those scans
-    are removed with them, which is what stops a repeated demonstration from
-    showing the parent three arrivals.
+    are removed with them, so a repeated demonstration does not show the parent
+    several arrivals.
     """
     from backend.db.models import AttendanceRecord, Notification
 
@@ -259,36 +273,69 @@ def main() -> int:
     if not args.database_url:
         raise SystemExit("No DATABASE_URL supplied and none configured.")
 
-    require_demo_database(args.database_url, args.allow_remote_demo_db)
+    database_url = normalize_database_url(args.database_url)
+    is_sqlite = database_url.startswith("sqlite")
+
+    require_demo_database(database_url, args.allow_remote_demo_db)
     if args.allow_remote_demo_db and not args.confirm_demo_database:
         raise SystemExit("--allow-remote-demo-db requires --confirm-demo-database.")
     if args.confirm_demo_database:
-        confirm_database_name(args.database_url, args.confirm_demo_database)
+        confirm_database_name(database_url, args.confirm_demo_database)
 
-    engine = create_engine(args.database_url, future=True)
-    Base.metadata.create_all(engine)
+    if not is_sqlite:
+        if not PROVIDED_AUTH_IDS["admin"]:
+            raise SystemExit(
+                "Set DEMO_ADMIN_AUTH_ID to the User UID of your Supabase user\n"
+                "(Supabase > Authentication > Users > click the user > User UID)."
+            )
+        for role, value in AUTH_USERS.items():
+            if PROVIDED_AUTH_IDS[role]:
+                try:
+                    uuid.UUID(value)
+                except ValueError:
+                    raise SystemExit(f"DEMO_{role.upper()}_AUTH_ID is not a valid UUID: {value!r}")
+
+    engine_kwargs = {"future": True}
+    if is_sqlite:
+        engine = create_engine(database_url, **engine_kwargs)
+        # Local throwaway SQLite database only. PostgreSQL schema comes from Alembic.
+        Base.metadata.create_all(engine)
+    else:
+        # Supabase poolers do not support server-side prepared statements.
+        engine = create_engine(
+            database_url, connect_args={"prepare_threshold": None}, **engine_kwargs
+        )
+
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     db = Session()
 
+    created_roles = []
+    cleared = 0
     try:
         school = upsert_school(db)
         school_class = upsert_class(db, school)
         student = upsert_student(db, school, school_class)
 
-        admin = upsert_profile(db, AUTH_USERS["admin"], DEMO_ADMIN_EMAIL, "Demo Admin")
-        teacher = upsert_profile(db, AUTH_USERS["teacher"], DEMO_TEACHER_EMAIL, "Demo Teacher")
-        parent = upsert_profile(db, AUTH_USERS["parent"], DEMO_PARENT_EMAIL, "Demo Parent")
+        if is_sqlite or PROVIDED_AUTH_IDS["admin"]:
+            admin = upsert_profile(db, AUTH_USERS["admin"], DEMO_ADMIN_EMAIL, "Demo Admin")
+            upsert_membership(db, admin, school, RoleEnum.school_admin)
+            created_roles.append("admin")
 
-        upsert_membership(db, admin, school, RoleEnum.school_admin)
-        upsert_membership(db, teacher, school, RoleEnum.teacher)
-        upsert_membership(db, parent, school, RoleEnum.parent)
+        if is_sqlite or PROVIDED_AUTH_IDS["teacher"]:
+            teacher = upsert_profile(db, AUTH_USERS["teacher"], DEMO_TEACHER_EMAIL, "Demo Teacher")
+            upsert_membership(db, teacher, school, RoleEnum.teacher)
+            created_roles.append("teacher")
 
-        upsert_parent_link(db, student, parent, school)
+        if is_sqlite or PROVIDED_AUTH_IDS["parent"]:
+            parent = upsert_profile(db, AUTH_USERS["parent"], DEMO_PARENT_EMAIL, "Demo Parent")
+            upsert_membership(db, parent, school, RoleEnum.parent)
+            upsert_parent_link(db, student, parent, school)
+            created_roles.append("parent")
 
-        cleared = 0
         if args.reset:
             cleared = reset_demo_attendance(db, student)
-    # Captured before the session closes; the ORM detaches on close.
+
+        # Captured before the session closes; the ORM detaches on close.
         student_id = str(student.id)
     finally:
         db.close()
@@ -303,16 +350,11 @@ def main() -> int:
     print(f"Admission number: {DEMO_ADMISSION}")
     print(f"Student id      : {student_id}")
     print(f"Attendance reset: {cleared} record(s) removed" if args.reset else "Attendance reset: not requested")
+    print(f"Roles linked    : {', '.join(created_roles) if created_roles else 'none'}")
     print()
-    print("Accounts (create these in Supabase Auth, then re-run with the ids):")
-    print(f"  admin   {DEMO_ADMIN_EMAIL}    auth id -> {AUTH_USERS['admin']}")
-    print(f"  teacher {DEMO_TEACHER_EMAIL}  auth id -> {AUTH_USERS['teacher']}")
-    print(f"  parent  {DEMO_PARENT_EMAIL}   auth id -> {AUTH_USERS['parent']}")
-    print()
-    print("Next: sign in as the admin, open the student, generate the QR, then")
-    print("sign in as the parent on a second device. No QR is generated here on")
-    print("purpose: the demonstration must use a real credential from the real")
-    print("generation endpoint, not a token printed by a script.")
+    print("Next: sign in with the admin account, open the student, generate the QR.")
+    print("No QR is generated here on purpose: the demonstration must use a real")
+    print("credential from the real generation endpoint, not a token printed by a script.")
     return 0
 
 

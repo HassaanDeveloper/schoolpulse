@@ -1,3 +1,7 @@
+import json
+import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, status
@@ -10,6 +14,11 @@ from backend.db.session import get_db
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+_JWKS_TTL_SECONDS = 600
+_JWKS_MIN_REFETCH_SECONDS = 60
+_jwks_lock = threading.Lock()
+_jwks_cache: dict = {"keys": {}, "fetched_at": None}
+
 
 @dataclass(frozen=True)
 class AuthenticatedUser:
@@ -18,39 +27,98 @@ class AuthenticatedUser:
     profile: UserProfile | None
 
 
+def _invalid_token() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired authentication token.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _auth_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Authentication is not configured on this server.",
+    )
+
+
+def _supabase_base() -> str:
+    base = (settings.SUPABASE_URL or "").rstrip("/")
+    if not base.startswith(("https://", "http://")):
+        raise _auth_unavailable()
+    return base
+
+
+def _fetch_jwks() -> dict[str, dict]:
+    url = f"{_supabase_base()}/auth/v1/.well-known/jwks.json"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        raise _auth_unavailable()
+    return {k["kid"]: k for k in payload.get("keys", []) if k.get("kid")}
+
+
+def _get_signing_key(kid: str):
+    now = time.monotonic()
+    with _jwks_lock:
+        key = _jwks_cache["keys"].get(kid)
+        fetched_at = _jwks_cache["fetched_at"]
+        if fetched_at is not None:
+            age = now - fetched_at
+            if key is not None and age < _JWKS_TTL_SECONDS:
+                return key
+            if key is None and age < _JWKS_MIN_REFETCH_SECONDS:
+                return None
+        keys = _fetch_jwks()
+        _jwks_cache["keys"] = keys
+        _jwks_cache["fetched_at"] = now
+        return keys.get(kid)
+
+
 def decode_access_token(token: str) -> dict:
     from jose import jwt
-    from jose.exceptions import JWTError
+    from jose.exceptions import JOSEError
 
-    secret = settings.SUPABASE_JWT_SECRET
-    if not secret:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is not configured on this server.",
-        )
+    verify_aud = bool(settings.SUPABASE_JWT_AUDIENCE)
 
     try:
-        claims = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            audience=settings.SUPABASE_JWT_AUDIENCE,
-            options={"verify_aud": bool(settings.SUPABASE_JWT_AUDIENCE)},
-        )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authentication token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        header = jwt.get_unverified_header(token)
+        alg = header.get("alg")
 
-    subject = claims.get("sub")
-    if not subject:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authentication token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        if alg == "HS256":
+            secret = settings.SUPABASE_JWT_SECRET
+            if not secret:
+                raise _auth_unavailable()
+            claims = jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                audience=settings.SUPABASE_JWT_AUDIENCE,
+                options={"verify_aud": verify_aud},
+            )
+        elif alg in ("ES256", "RS256"):
+            kid = header.get("kid")
+            if not kid:
+                raise _invalid_token()
+            jwk = _get_signing_key(kid)
+            if jwk is None:
+                raise _invalid_token()
+            claims = jwt.decode(
+                token,
+                jwk,
+                algorithms=[alg],
+                audience=settings.SUPABASE_JWT_AUDIENCE,
+                issuer=f"{_supabase_base()}/auth/v1",
+                options={"verify_aud": verify_aud},
+            )
+        else:
+            raise _invalid_token()
+    except JOSEError:
+        raise _invalid_token()
+
+    if not claims.get("sub"):
+        raise _invalid_token()
 
     return claims
 

@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import relationship
 
@@ -236,6 +237,10 @@ class StudentQrCredential(Base):
 
     Only the SHA-256 hash of the credential is stored. The plaintext token is
     returned once, at generation time, and is never persisted or logged.
+
+    At most one credential per student can be active (`revoked_at IS NULL`).
+    The partial unique index enforces that in the database itself, so two
+    concurrent "generate" requests can never leave a student with two live codes.
     """
 
     __tablename__ = "student_qr_credentials"
@@ -254,6 +259,13 @@ class StudentQrCredential(Base):
         Index("ix_qr_credential_student_id", "student_id"),
         Index("ix_qr_credential_school_id", "school_id"),
         Index("ix_qr_credential_active", "student_id", "revoked_at"),
+        Index(
+            "uq_qr_one_active_per_student",
+            "student_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
     )
 
 

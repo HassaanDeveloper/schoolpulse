@@ -73,8 +73,24 @@ def issue_credential(
     Returns the credential row, the plaintext token (returned to the caller
     exactly once and never persisted) and whether a previous credential was
     revoked.
+
+    Concurrency: on PostgreSQL the student's row is locked first, so two
+    simultaneous "generate" requests for the same student run one after the
+    other instead of racing. The second request then revokes the first one's
+    code and issues its own, so exactly one credential stays active. The
+    partial unique index `uq_qr_one_active_per_student` remains as the
+    database-level backstop. SQLite ignores the lock, which is fine for tests.
     """
+    db.execute(
+        select(Student.id)
+        .where(Student.id == student.id)
+        .with_for_update(key_share=True)
+    )
+
     revoked_previous = revoke_active_credential(db, student.id)
+    # Make the revoke reach the database before the insert, so the new row never
+    # collides with the old one under the one-active-credential index.
+    db.flush()
 
     raw_credential = generate_credential()
     credential = StudentQrCredential(

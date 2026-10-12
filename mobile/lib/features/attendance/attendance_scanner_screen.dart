@@ -30,6 +30,15 @@ class _AttendanceScannerScreenState extends State<AttendanceScannerScreen> {
   bool _scanning = true;
   bool _submitting = false;
 
+  /// When each code was last seen in front of the camera.
+  ///
+  /// The camera reports the same QR code many times a second while it stays in
+  /// view. A code only counts as a new scan once it has been out of view for
+  /// [_rearmGap], so holding one card steady records exactly one scan.
+  final Map<String, DateTime> _lastSeen = <String, DateTime>{};
+  static const Duration _rearmGap = Duration(seconds: 2);
+  static const Duration _forgetAfter = Duration(minutes: 1);
+
   @override
   void initState() {
     super.initState();
@@ -43,17 +52,36 @@ class _AttendanceScannerScreenState extends State<AttendanceScannerScreen> {
   }
 
   void _onDetect(BarcodeCapture capture) {
-    if (!_scanning || _submitting) {
-      return;
-    }
+    final now = DateTime.now();
+    final busy = !_scanning || _submitting;
+    String? candidate;
 
     for (final barcode in capture.barcodes) {
-      final raw = barcode.rawValue;
-      if (raw == null || raw.trim().isEmpty) {
+      final raw = barcode.rawValue?.trim();
+      if (raw == null || raw.isEmpty) {
         continue;
       }
-      _submit(raw.trim());
-      return;
+
+      final previous = _lastSeen[raw];
+      final isFresh = previous == null || now.difference(previous) >= _rearmGap;
+
+      if (isFresh) {
+        // Only claim a fresh code when we can submit it right now. While busy
+        // it stays fresh, so it is still scanned once the request finishes.
+        if (!busy && candidate == null) {
+          candidate = raw;
+          _lastSeen[raw] = now;
+        }
+      } else {
+        // Still in front of the camera: keep it disarmed.
+        _lastSeen[raw] = now;
+      }
+    }
+
+    _lastSeen.removeWhere((_, seen) => now.difference(seen) > _forgetAfter);
+
+    if (candidate != null) {
+      _submit(candidate);
     }
   }
 
@@ -150,6 +178,22 @@ class _AttendanceScannerScreenState extends State<AttendanceScannerScreen> {
                         decoration: BoxDecoration(
                           border: Border.all(color: Colors.white, width: 3),
                           borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const IgnorePointer(
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Padding(
+                        padding: EdgeInsets.only(bottom: 16, left: 16, right: 16),
+                        child: Text(
+                          'Hold the code steady, then move it away before the next scan.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            shadows: [Shadow(blurRadius: 4, color: Colors.black)],
+                          ),
                         ),
                       ),
                     ),

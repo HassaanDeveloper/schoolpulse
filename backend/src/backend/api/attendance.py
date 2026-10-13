@@ -1,5 +1,7 @@
 import logging
+import os
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +40,34 @@ INACTIVE_STUDENT_DETAIL = "This student is inactive and cannot be marked present
 CROSS_SCHOOL_DETAIL = "This QR credential cannot be used at your school."
 
 
+def duplicate_window_seconds() -> int:
+    """Seconds after an arrival during which a repeat scan is a duplicate read.
+
+    A camera or a double tap can read the same card several times in a moment.
+    Inside this window a repeat read of an arrived student is answered with
+    ALREADY_RECORDED instead of being recorded as a departure. 0 disables the
+    guard. Read per request so it can be changed with an environment variable.
+    """
+    try:
+        return max(0, int(os.environ.get("SCAN_DUPLICATE_WINDOW_SECONDS", "0")))
+    except ValueError:
+        return 0
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def is_duplicate_read(record: AttendanceRecord, now: datetime) -> bool:
+    window = duplicate_window_seconds()
+    if window <= 0 or record.arrival_at is None:
+        return False
+    elapsed = (_as_utc(now) - _as_utc(record.arrival_at)).total_seconds()
+    return elapsed < window
+
+
 def student_name(student: Student) -> str:
     return f"{student.first_name} {student.last_name}".strip()
 
@@ -49,8 +79,11 @@ def build_response(
 ) -> ScanResponse:
     if status_value is ScanStatus.ARRIVAL_RECORDED:
         timestamp = record.arrival_at
-    else:
+    elif status_value is ScanStatus.DEPARTURE_RECORDED:
         timestamp = record.departure_at
+    else:
+        # ALREADY_RECORDED: report the latest event that exists.
+        timestamp = record.departure_at or record.arrival_at
 
     return ScanResponse(
         status=status_value,
@@ -220,6 +253,12 @@ def _apply_existing(
     school: School,
 ) -> ScanResponse:
     if record.arrival_at is not None and record.departure_at is None:
+        # A repeat read moments after the arrival is a duplicate read of the
+        # same card, not a departure. Nothing is written and nobody is notified.
+        if is_duplicate_read(record, now):
+            logger.info("duplicate scan ignored for student %s", student.id)
+            return build_response(ScanStatus.ALREADY_RECORDED, student, record)
+
         record.departure_at = now
         record.departure_scanned_by = profile.id
         try:

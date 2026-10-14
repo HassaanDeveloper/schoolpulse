@@ -17,7 +17,7 @@ from backend.db.models import (
 )
 from backend.db.session import get_db
 from backend.schemas.qr_credential import QrCredentialRead, QrCredentialStatusRead
-from backend.services import id_cards, qr_credentials
+from backend.services import qr_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,17 @@ def post_class_cards(
     stored in one transaction afterwards, so a failure leaves nothing changed.
     """
     school_class = get_class_for_admin(db, user, class_id)
+
+    # The PDF library is loaded here, not at startup, so a problem with it can
+    # only ever affect card printing and never login or scanning.
+    try:
+        from backend.services import id_cards
+    except ImportError:
+        logger.exception("card printing library is not available")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Card printing is not available right now.",
+        )
 
     school = db.query(School).filter(School.id == school_class.school_id).one_or_none()
     if school is None:

@@ -3,7 +3,7 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from backend.db.models import School, Student, StudentQrCredential
@@ -103,6 +103,57 @@ def issue_credential(
     db.refresh(credential)
 
     return credential, raw_credential, revoked_previous
+
+
+def replace_credentials_bulk(
+    db: Session,
+    students: list[Student],
+    raw_credentials: dict[uuid.UUID, str],
+) -> None:
+    """Revoke the active credentials of many students and issue new ones.
+
+    Used for printing a whole class of ID cards. Everything happens in ONE
+    transaction: either every student gets the new credential or none do. The
+    plaintext tokens come from the caller (who has already put them on the
+    printable cards); only their hashes are stored here.
+
+    The student rows are locked in a fixed order first, so two admins printing
+    the same class at the same moment queue up instead of deadlocking.
+    """
+    if not students:
+        return
+
+    ids = sorted(student.id for student in students)
+    try:
+        db.execute(
+            select(Student.id)
+            .where(Student.id.in_(ids))
+            .order_by(Student.id)
+            .with_for_update(key_share=True)
+        )
+        db.execute(
+            update(StudentQrCredential)
+            .where(
+                StudentQrCredential.student_id.in_(ids),
+                StudentQrCredential.revoked_at.is_(None),
+            )
+            .values(revoked_at=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        )
+        db.add_all(
+            [
+                StudentQrCredential(
+                    student_id=student.id,
+                    school_id=student.school_id,
+                    token_hash=hash_credential(raw_credentials[student.id]),
+                )
+                for student in students
+            ]
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def resolve_active_credential(db: Session, raw_credential: str) -> StudentQrCredential | None:

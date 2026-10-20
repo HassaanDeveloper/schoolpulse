@@ -240,7 +240,7 @@ class _AttendanceDashboardScreenState extends State<AttendanceDashboardScreen> {
             child: _ErrorBanner(message: _error!),
           ),
         if (summary != null) ...[
-          _SchoolDayLine(summary: summary),
+          _HeaderCard(summary: summary),
           const SizedBox(height: 12),
           _SummaryRow(summary: summary),
           const SizedBox(height: 20),
@@ -298,24 +298,18 @@ class _AttendanceDashboardScreenState extends State<AttendanceDashboardScreen> {
             },
           )
         else ...[
-          Text(
-            '${page.total} student${page.total == 1 ? '' : 's'}',
-            style: Theme.of(context).textTheme.titleSmall,
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 10),
+            child: Text(
+              '${page.total} student${page.total == 1 ? '' : 's'}',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
           ),
-          const SizedBox(height: 8),
           ...page.items.map(
-            (item) => Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: ListTile(
-                onTap: () => _openStudent(item),
-                leading: StatusBadge(status: item.status),
-                title: Text(item.studentName),
-                subtitle: Text(
-                  '${item.admissionNumber} - ${item.classLabel}\n${_timesLine(item)}',
-                ),
-                isThreeLine: true,
-                trailing: const Icon(Icons.chevron_right),
-              ),
+            (item) => _StudentRow(
+              item: item,
+              timesLine: _timesLine(item),
+              onTap: () => _openStudent(item),
             ),
           ),
           if (page.pageCount > 1)
@@ -344,7 +338,7 @@ class _AttendanceDashboardScreenState extends State<AttendanceDashboardScreen> {
     if (departure == null) {
       return 'Arrived $arrival';
     }
-    return 'Arrived $arrival - left $departure';
+    return 'Arrived $arrival  \u00B7  Left $departure';
   }
 
   static String? _formatTime(DateTime? value) {
@@ -357,29 +351,122 @@ class _AttendanceDashboardScreenState extends State<AttendanceDashboardScreen> {
   }
 }
 
-/// The school and local date the counts belong to, so the user can tell which
-/// day they are looking at.
-class _SchoolDayLine extends StatelessWidget {
-  const _SchoolDayLine({required this.summary});
+/// Plain-language words for each status, used everywhere on this screen.
+String _statusWord(AttendanceStatus status) {
+  return switch (status) {
+    AttendanceStatus.present => 'In school',
+    AttendanceStatus.completed => 'Went home',
+    AttendanceStatus.absent => 'Absent',
+    AttendanceStatus.unknown => 'Unknown',
+  };
+}
+
+IconData _statusIcon(AttendanceStatus status) {
+  return switch (status) {
+    AttendanceStatus.present => Icons.check_circle_outline,
+    AttendanceStatus.completed => Icons.logout_rounded,
+    AttendanceStatus.absent => Icons.person_off_outlined,
+    AttendanceStatus.unknown => Icons.help_outline,
+  };
+}
+
+/// The initials shown in a student's avatar, for example "Ali Khan" -> "AK".
+String _initials(String name) {
+  final parts = name
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) {
+    return '?';
+  }
+  String first(String text) => String.fromCharCode(text.runes.first);
+  if (parts.length == 1) {
+    return first(parts.first).toUpperCase();
+  }
+  return (first(parts.first) + first(parts.last)).toUpperCase();
+}
+
+/// The school, the local date, and how much of the school has arrived.
+class _HeaderCard extends StatelessWidget {
+  const _HeaderCard({required this.summary});
 
   final AttendanceSummary summary;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final onColor = scheme.onPrimaryContainer;
     final date = summary.date;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(summary.schoolName, style: theme.textTheme.titleMedium),
-        Text(
-          date == null
-              ? 'School local date'
-              : '${_weekday(date)}, ${formatDateOnly(date)}',
-          style: theme.textTheme.bodySmall,
-        ),
-      ],
+    final total = summary.present + summary.completed + summary.absent;
+    final arrived = summary.present + summary.completed;
+    final rate = total == 0 ? 0.0 : arrived / total;
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            summary.schoolName,
+            style: theme.textTheme.titleLarge?.copyWith(
+              color: onColor,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            date == null ? 'Today' : '${_weekday(date)}, ${formatDateOnly(date)}',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: onColor.withValues(alpha: 0.8),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '${(rate * 100).round()}%',
+                style: theme.textTheme.displaySmall?.copyWith(
+                  color: onColor,
+                  fontWeight: FontWeight.w800,
+                  height: 1,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    total == 0
+                        ? 'No students enrolled yet'
+                        : '$arrived of $total students have arrived',
+                    style: theme.textTheme.bodyMedium?.copyWith(color: onColor),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (total > 0) ...[
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: rate,
+                minHeight: 8,
+                backgroundColor: onColor.withValues(alpha: 0.15),
+                valueColor: AlwaysStoppedAnimation<Color>(scheme.primary),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -408,7 +495,7 @@ class _SummaryRow extends StatelessWidget {
       children: [
         Expanded(
           child: _SummaryCard(
-            label: 'Present',
+            label: 'In school',
             value: summary.present,
             status: AttendanceStatus.present,
           ),
@@ -416,7 +503,7 @@ class _SummaryRow extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(
           child: _SummaryCard(
-            label: 'Completed',
+            label: 'Went home',
             value: summary.completed,
             status: AttendanceStatus.completed,
           ),
@@ -448,31 +535,154 @@ class _SummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final color = statusColor(context, status);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        children: [
+          Icon(_statusIcon(status), color: color, size: 22),
+          const SizedBox(height: 6),
+          Text(
+            '$value',
+            style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.labelMedium,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One student: initials, name, class, today's times and a status chip.
+class _StudentRow extends StatelessWidget {
+  const _StudentRow({
+    required this.item,
+    required this.timesLine,
+    required this.onTap,
+  });
+
+  final TodayAttendanceItem item;
+  final String timesLine;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
 
     return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
-        child: Column(
-          children: [
-            Text('$value', style: theme.textTheme.headlineSmall),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                StatusDot(status: status),
-                const SizedBox(width: 4),
-                Flexible(
-                  child: Text(
-                    label,
-                    style: theme.textTheme.labelSmall,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+      margin: const EdgeInsets.only(bottom: 10),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              _Avatar(name: item.studentName),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.studentName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${item.admissionNumber} - ${item.classLabel}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      timesLine,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ],
+              ),
+              const SizedBox(width: 8),
+              _StatusChip(status: item.status),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+}
+
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return CircleAvatar(
+      radius: 24,
+      backgroundColor: scheme.secondaryContainer,
+      child: Text(
+        _initials(name),
+        style: TextStyle(
+          color: scheme.onSecondaryContainer,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.status});
+
+  final AttendanceStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = statusColor(context, status);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(_statusIcon(status), size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            _statusWord(status),
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+        ],
       ),
     );
   }
@@ -505,7 +715,7 @@ Color statusColor(BuildContext context, AttendanceStatus status) {
   };
 }
 
-/// Leading badge showing the status word as well as its colour.
+/// Round badge showing the status as an icon in the status colour.
 class StatusBadge extends StatelessWidget {
   const StatusBadge({super.key, required this.status});
 
@@ -513,7 +723,6 @@ class StatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final color = statusColor(context, status);
 
     return Container(
@@ -524,10 +733,7 @@ class StatusBadge extends StatelessWidget {
         shape: BoxShape.circle,
       ),
       alignment: Alignment.center,
-      child: Text(
-        status.label.characters.first,
-        style: theme.textTheme.titleMedium?.copyWith(color: color),
-      ),
+      child: Icon(_statusIcon(status), color: color, size: 22),
     );
   }
 }
@@ -551,9 +757,13 @@ class _SearchField extends StatelessWidget {
       textInputAction: TextInputAction.search,
       decoration: InputDecoration(
         isDense: true,
+        filled: true,
         prefixIcon: const Icon(Icons.search),
         hintText: 'Search name or admission number',
-        border: const OutlineInputBorder(),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
         suffixIcon: ValueListenableBuilder<TextEditingValue>(
           valueListenable: controller,
           builder: (context, value, _) {
@@ -608,7 +818,7 @@ class _FilterPanel extends StatelessWidget {
                 ),
                 for (final option in AttendanceStatus.values.where((s) => s != AttendanceStatus.unknown))
                   ChoiceChip(
-                    label: Text(option.label),
+                    label: Text(_statusWord(option)),
                     selected: status == option,
                     onSelected: (_) => onStatusChanged(status == option ? null : option),
                   ),

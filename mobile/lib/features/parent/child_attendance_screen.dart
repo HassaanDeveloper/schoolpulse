@@ -226,105 +226,214 @@ class _ChildAttendanceScreenState extends State<ChildAttendanceScreen> {
         : attendance.records.where((record) => !_sameDay(record.date, anchor));
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       children: [
-        _SummaryCard(attendance: attendance),
+        _ChildHeader(child: widget.child),
         const SizedBox(height: 16),
-        _TodaySection(record: todayRecord, child: widget.child),
+        _TodayCard(record: todayRecord, child: widget.child),
         const SizedBox(height: 16),
-        Text('History', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
+        _SummaryTiles(attendance: attendance),
+        const SizedBox(height: 24),
+        Text(
+          'History',
+          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 10),
         if (history.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
             child: Text('No earlier days in this range.'),
           )
         else
-          ...history.take(widget.pageSize).map((record) => _dayTile(record, today)),
+          ...history.take(widget.pageSize).map(
+                (record) => _DayRow(record: record, today: today),
+              ),
       ],
     );
   }
 
   static bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+}
 
-  Widget _dayTile(AttendanceHistoryRecord record, DateTime? today) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: Icon(_iconFor(record.status), color: _colorFor(context, record.status)),
-        title: Text(_labelFor(record.date, today)),
-        subtitle: Text(record.status.label),
-        trailing: Text(
-          _timesFor(record),
-          textAlign: TextAlign.right,
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ),
-    );
-  }
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
-  static IconData _iconFor(AttendanceStatus status) => switch (status) {
-        AttendanceStatus.present => Icons.check_circle_outline,
-        AttendanceStatus.completed => Icons.done_all,
-        AttendanceStatus.absent => Icons.cancel_outlined,
-        AttendanceStatus.unknown => Icons.help_outline,
-      };
+class _Tone {
+  const _Tone(this.color, this.icon);
 
-  static Color _colorFor(BuildContext context, AttendanceStatus status) =>
-      switch (status) {
-        AttendanceStatus.present => Theme.of(context).colorScheme.primary,
-        AttendanceStatus.completed => Theme.of(context).colorScheme.primary,
-        AttendanceStatus.absent => Theme.of(context).colorScheme.error,
-        AttendanceStatus.unknown => Theme.of(context).colorScheme.outline,
-      };
+  final Color color;
+  final IconData icon;
+}
 
-  /// Labels relative to the server's today, not the device's.
-  static String _labelFor(DateTime date, DateTime? today) {
-    if (today == null) {
-      return formatDateOnly(date);
-    }
-    final day = DateTime(date.year, date.month, date.day);
-    final anchor = DateTime(today.year, today.month, today.day);
-    final difference = anchor.difference(day).inDays;
-    if (difference == 0) {
-      return 'Today';
-    }
-    if (difference == 1) {
-      return 'Yesterday';
-    }
-    return formatDateOnly(day);
-  }
-
-  static String _timesFor(AttendanceHistoryRecord record) {
-    final arrival = record.arrivalTime ?? _localTime(record.arrivalAt);
-    final departure = record.departureTime ?? _localTime(record.departureAt);
-    if (arrival == null && departure == null) {
-      return 'No times';
-    }
-    if (departure == null) {
-      return 'In $arrival';
-    }
-    return '$arrival - $departure';
-  }
-
-  /// Only used when the server did not send a preformatted time. The Day 5
-  /// parent endpoint always does, so a scan time is never recomputed from the
-  /// phone's clock on the parent screens.
-  static String? _localTime(DateTime? value) {
-    if (value == null) {
-      return null;
-    }
-    final local = value.toLocal();
-    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
-    final minute = local.minute.toString().padLeft(2, '0');
-    final suffix = local.hour >= 12 ? 'PM' : 'AM';
-    return '$hour:$minute $suffix';
+/// One colour and icon per status. Today's "absent" is amber (the normal state
+/// early in the day); an absent day in the past is red.
+_Tone _toneOf(BuildContext context, AttendanceStatus status, {required bool today}) {
+  final scheme = Theme.of(context).colorScheme;
+  switch (status) {
+    case AttendanceStatus.present:
+      return const _Tone(Color(0xFF1B873F), Icons.check_circle_rounded);
+    case AttendanceStatus.completed:
+      return const _Tone(Color(0xFF1F6FEB), Icons.logout_rounded);
+    case AttendanceStatus.absent:
+      return today
+          ? const _Tone(Color(0xFFB26A00), Icons.schedule_rounded)
+          : _Tone(scheme.error, Icons.cancel_rounded);
+    case AttendanceStatus.unknown:
+      return _Tone(scheme.outline, Icons.help_outline);
   }
 }
 
-class _TodaySection extends StatelessWidget {
-  const _TodaySection({required this.record, required this.child});
+String _todayText(AttendanceStatus status) {
+  return switch (status) {
+    AttendanceStatus.present => 'Arrived today',
+    AttendanceStatus.completed => 'Arrived and left today',
+    AttendanceStatus.absent => 'Not marked present today',
+    AttendanceStatus.unknown => 'No update yet',
+  };
+}
+
+String _dayWord(AttendanceStatus status) {
+  return switch (status) {
+    AttendanceStatus.present => 'Arrived',
+    AttendanceStatus.completed => 'Arrived and left',
+    AttendanceStatus.absent => 'Absent',
+    AttendanceStatus.unknown => 'Unknown',
+  };
+}
+
+AttendanceStatus? _statusFromWire(String? value) => switch (value) {
+      'present' => AttendanceStatus.present,
+      'completed' => AttendanceStatus.completed,
+      'absent' => AttendanceStatus.absent,
+      _ => null,
+    };
+
+String? _arrivalOf(AttendanceHistoryRecord record) =>
+    record.arrivalTime ?? _localTime(record.arrivalAt);
+
+String? _departureOf(AttendanceHistoryRecord record) =>
+    record.departureTime ?? _localTime(record.departureAt);
+
+String _timesFor(AttendanceHistoryRecord record) {
+  final arrival = _arrivalOf(record);
+  final departure = _departureOf(record);
+  if (arrival == null && departure == null) {
+    return 'No times';
+  }
+  if (departure == null) {
+    return 'In $arrival';
+  }
+  return '$arrival - $departure';
+}
+
+/// Only used when the server did not send a preformatted time. The parent
+/// endpoint always does, so a scan time is never recomputed from the phone's
+/// clock on the parent screens.
+String? _localTime(DateTime? value) {
+  if (value == null) {
+    return null;
+  }
+  final local = value.toLocal();
+  final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final minute = local.minute.toString().padLeft(2, '0');
+  final suffix = local.hour >= 12 ? 'PM' : 'AM';
+  return '$hour:$minute $suffix';
+}
+
+/// Labels relative to the server's today, not the device's.
+String _labelFor(DateTime date, DateTime? today) {
+  if (today == null) {
+    return formatDateOnly(date);
+  }
+  final day = DateTime(date.year, date.month, date.day);
+  final anchor = DateTime(today.year, today.month, today.day);
+  final difference = anchor.difference(day).inDays;
+  if (difference == 0) {
+    return 'Today';
+  }
+  if (difference == 1) {
+    return 'Yesterday';
+  }
+  return formatDateOnly(day);
+}
+
+String _initials(String name) {
+  final parts = name
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) {
+    return '?';
+  }
+  String first(String text) => String.fromCharCode(text.runes.first);
+  if (parts.length == 1) {
+    return first(parts.first).toUpperCase();
+  }
+  return (first(parts.first) + first(parts.last)).toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Widgets
+// ---------------------------------------------------------------------------
+
+class _ChildHeader extends StatelessWidget {
+  const _ChildHeader({required this.child});
+
+  final ParentChild child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 28,
+          backgroundColor: scheme.primaryContainer,
+          child: Text(
+            _initials(child.fullName),
+            style: TextStyle(
+              color: scheme.onPrimaryContainer,
+              fontWeight: FontWeight.w800,
+              fontSize: 18,
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                child.fullName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              Text(
+                child.classLabel.isEmpty
+                    ? child.schoolName
+                    : '${child.classLabel} - ${child.schoolName}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TodayCard extends StatelessWidget {
+  const _TodayCard({required this.record, required this.child});
 
   final AttendanceHistoryRecord? record;
   final ParentChild child;
@@ -335,110 +444,145 @@ class _TodaySection extends StatelessWidget {
     final today = record;
     // Prefer the record from the range; fall back to the status the children
     // list resolved when the chosen range does not reach today.
-    final wireStatus = child.todayStatus;
-    final status = today?.status ??
-        (wireStatus == null ? null : _statusFromWire(wireStatus));
+    final status = today?.status ?? _statusFromWire(child.todayStatus);
     final date = today?.date ?? parseDateOnly(child.todayStatusDate);
+    final tone = status == null ? null : _toneOf(context, status, today: true);
+    final accent = tone?.color ?? theme.colorScheme.outline;
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: accent.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                'Today',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              if (date != null)
+                Text(formatDateOnly(date), style: theme.textTheme.bodySmall),
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (status == null || tone == null)
+            const Text('Nothing recorded for today yet.')
+          else ...[
             Row(
               children: [
-                Text('Today', style: theme.textTheme.titleSmall),
-                const Spacer(),
-                if (date != null)
-                  Text(formatDateOnly(date), style: theme.textTheme.bodySmall),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (status == null)
-              const Text('Nothing recorded for today yet.')
-            else ...[
-              Row(
-                children: [
-                  Icon(
-                    _iconFor(status),
-                    color: _colorFor(context, status),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      status.label,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        color: _colorFor(context, status),
-                      ),
+                Icon(tone.icon, color: tone.color, size: 40),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    _todayText(status),
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      color: tone.color,
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                ],
-              ),
-              if (today != null) ...[
-                const SizedBox(height: 12),
-                Text(_timesFor(today), style: theme.textTheme.bodyMedium),
+                ),
               ],
+            ),
+            if (today != null) ...[
+              const SizedBox(height: 18),
+              _TimelineRow(
+                label: 'Arrived',
+                time: _arrivalOf(today),
+                color: tone.color,
+                showLine: true,
+              ),
+              _TimelineRow(
+                label: 'Left school',
+                time: _departureOf(today),
+                color: tone.color,
+                showLine: false,
+              ),
             ],
           ],
-        ),
+        ],
       ),
     );
   }
+}
 
-  /// Falls back to the children-list status when the selected range does not
-  /// reach today.
-  static AttendanceStatus? _statusFromWire(String value) => switch (value) {
-        'present' => AttendanceStatus.present,
-        'completed' => AttendanceStatus.completed,
-        'absent' => AttendanceStatus.absent,
-        _ => null,
-      };
+/// One step of the arrival/departure timeline. The dot is filled once the event
+/// has happened and hollow while it is still to come.
+class _TimelineRow extends StatelessWidget {
+  const _TimelineRow({
+    required this.label,
+    required this.time,
+    required this.color,
+    required this.showLine,
+  });
 
-  static IconData _iconFor(AttendanceStatus status) => switch (status) {
-        AttendanceStatus.present => Icons.check_circle_outline,
-        AttendanceStatus.completed => Icons.done_all,
-        AttendanceStatus.absent => Icons.cancel_outlined,
-        AttendanceStatus.unknown => Icons.help_outline,
-      };
+  final String label;
+  final String? time;
+  final Color color;
+  final bool showLine;
 
-  static Color _colorFor(BuildContext context, AttendanceStatus status) =>
-      switch (status) {
-        AttendanceStatus.present => Theme.of(context).colorScheme.primary,
-        AttendanceStatus.completed => Theme.of(context).colorScheme.primary,
-        AttendanceStatus.absent => Theme.of(context).colorScheme.error,
-        AttendanceStatus.unknown => Theme.of(context).colorScheme.outline,
-      };
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final done = time != null;
 
-  static String _timesFor(AttendanceHistoryRecord record) {
-    final arrival = record.arrivalTime ?? _localTime(record.arrivalAt);
-    final departure = record.departureTime ?? _localTime(record.departureAt);
-    if (arrival == null && departure == null) {
-      return 'No times';
-    }
-    if (departure == null) {
-      return 'In $arrival';
-    }
-    return '$arrival - $departure';
-  }
-
-  /// Only used when the server did not send a preformatted time. The parent
-  /// endpoint always does, so scan times are never recomputed from the phone's
-  /// clock.
-  static String? _localTime(DateTime? value) {
-    if (value == null) {
-      return null;
-    }
-    final local = value.toLocal();
-    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
-    final minute = local.minute.toString().padLeft(2, '0');
-    final suffix = local.hour >= 12 ? 'PM' : 'AM';
-    return '$hour:$minute $suffix';
+    return SizedBox(
+      height: showLine ? 44 : 24,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 16,
+            child: Column(
+              children: [
+                Container(
+                  width: 14,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: done ? color : Colors.transparent,
+                    border: Border.all(color: color, width: 2),
+                  ),
+                ),
+                if (showLine)
+                  Expanded(
+                    child: Container(width: 2, color: color.withValues(alpha: 0.35)),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Row(
+              children: [
+                Text(label, style: theme.textTheme.bodyLarge),
+                const Spacer(),
+                Text(
+                  time ?? '-',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: done ? null : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.attendance});
+class _SummaryTiles extends StatelessWidget {
+  const _SummaryTiles({required this.attendance});
 
   final ParentChildAttendance attendance;
 
@@ -446,37 +590,48 @@ class _SummaryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Last ${attendance.records.length} school days',
+          style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 10),
+        Row(
           children: [
-            Text('Last ${attendance.records.length} school days', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                _Stat(label: 'On site', value: attendance.daysOnSite, color: theme.colorScheme.primary),
-                _Stat(label: 'Absent', value: attendance.absentDays, color: theme.colorScheme.error),
-                _Stat(label: 'Days shown', value: attendance.records.length, color: theme.colorScheme.outline),
-              ],
-            ),
-            if (attendance.latest != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                'Most recent: ${attendance.latest!.status.label}',
-                style: theme.textTheme.bodyMedium,
+            Expanded(
+              child: _StatTile(
+                label: 'On site',
+                value: attendance.daysOnSite,
+                color: const Color(0xFF1B873F),
               ),
-            ],
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _StatTile(
+                label: 'Absent',
+                value: attendance.absentDays,
+                color: theme.colorScheme.error,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _StatTile(
+                label: 'Days shown',
+                value: attendance.records.length,
+                color: theme.colorScheme.outline,
+              ),
+            ),
           ],
         ),
-      ),
+      ],
     );
   }
 }
 
-class _Stat extends StatelessWidget {
-  const _Stat({required this.label, required this.value, required this.color});
+class _StatTile extends StatelessWidget {
+  const _StatTile({required this.label, required this.value, required this.color});
 
   final String label;
   final int value;
@@ -485,12 +640,83 @@ class _Stat extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Expanded(
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('$value', style: theme.textTheme.headlineSmall?.copyWith(color: color)),
-          Text(label, style: theme.textTheme.bodySmall),
+          Text(
+            '$value',
+            style: theme.textTheme.headlineSmall?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DayRow extends StatelessWidget {
+  const _DayRow({required this.record, required this.today});
+
+  final AttendanceHistoryRecord record;
+  final DateTime? today;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tone = _toneOf(context, record.status, today: false);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 20,
+            backgroundColor: tone.color.withValues(alpha: 0.12),
+            child: Icon(tone.icon, color: tone.color, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _labelFor(record.date, today),
+                  style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                Text(
+                  _dayWord(record.status),
+                  style: theme.textTheme.bodySmall?.copyWith(color: tone.color),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            _timesFor(record),
+            textAlign: TextAlign.right,
+            style: theme.textTheme.bodySmall,
+          ),
         ],
       ),
     );

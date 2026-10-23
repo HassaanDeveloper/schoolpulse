@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/network/api_client.dart';
+import '../attendance/attendance_report_repository.dart';
 import '../auth/auth_controller.dart';
 import '../notifications/notification_repository.dart';
 import '../notifications/notifications_screen.dart';
@@ -121,6 +122,17 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
     }
   }
 
+  void _openChild(ParentChild child) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChildAttendanceScreen(
+          child: child,
+          repository: widget.parentRepository,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -192,12 +204,12 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
         padding: const EdgeInsets.all(24),
         children: [
           const SizedBox(height: 48),
-          Icon(Icons.family_restroom_outlined, size: 48, color: theme.colorScheme.primary),
+          Icon(Icons.family_restroom_outlined, size: 56, color: theme.colorScheme.primary),
           const SizedBox(height: 16),
           Text(
             'No children linked yet',
             textAlign: TextAlign.center,
-            style: theme.textTheme.titleMedium,
+            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
           const Text(
@@ -209,63 +221,245 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
     }
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       children: [
         if (_unreadCount > 0)
-          Card(
-            margin: const EdgeInsets.only(bottom: 12),
-            color: theme.colorScheme.primaryContainer,
-            child: ListTile(
-              leading: const Icon(Icons.notifications_active_outlined),
-              title: Text(
-                _unreadCount == 1 ? '1 new update' : '$_unreadCount new updates',
-              ),
-              subtitle: const Text('Arrival and departure times for your children'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _openNotifications,
-            ),
+          _UpdatesBanner(count: _unreadCount, onTap: _openNotifications),
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 10),
+          child: Text(
+            'Today at school',
+            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
-        ...children.map(_childCard),
+        ),
+        ...children.map(
+          (child) => _ChildCard(child: child, onTap: () => _openChild(child)),
+        ),
       ],
     );
   }
+}
 
-  Widget _childCard(ParentChild child) {
-    final status = child.todayStatusLabel;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        leading: const Icon(Icons.person_outline),
-        title: Text(child.fullName),
-        // Today's status sits above the class line: it is the reason a parent
-        // opens this screen, and class/school is supporting detail.
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (status != null) ...[
-              Text(
-                status,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurface,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 2),
-            ],
-            Text(
-              child.classLabel.isEmpty
-                  ? child.schoolName
-                  : '${child.classLabel} - ${child.schoolName}',
-            ),
-          ],
+class _Tone {
+  const _Tone(this.color, this.icon);
+
+  final Color color;
+  final IconData icon;
+}
+
+/// Colour and icon for the status the server resolved for the school's today.
+///
+/// "Not marked present" is amber rather than red: early in the morning it is
+/// the normal state, and a parent should not be alarmed by it.
+_Tone _toneFor(String? wireStatus) {
+  switch (wireStatus) {
+    case 'present':
+      return const _Tone(Color(0xFF1B873F), Icons.check_circle_rounded);
+    case 'completed':
+      return const _Tone(Color(0xFF1F6FEB), Icons.logout_rounded);
+    default:
+      return const _Tone(Color(0xFFB26A00), Icons.schedule_rounded);
+  }
+}
+
+String _initials(String name) {
+  final parts = name
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) {
+    return '?';
+  }
+  String first(String text) => String.fromCharCode(text.runes.first);
+  if (parts.length == 1) {
+    return first(parts.first).toUpperCase();
+  }
+  return (first(parts.first) + first(parts.last)).toUpperCase();
+}
+
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return CircleAvatar(
+      radius: 26,
+      backgroundColor: scheme.primaryContainer,
+      child: Text(
+        _initials(name),
+        style: TextStyle(
+          color: scheme.onPrimaryContainer,
+          fontWeight: FontWeight.w800,
+          fontSize: 16,
         ),
-        isThreeLine: status != null,
-        trailing: const Icon(Icons.chevron_right),
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ChildAttendanceScreen(
-              child: child,
-              repository: widget.parentRepository,
+      ),
+    );
+  }
+}
+
+class _ChildCard extends StatelessWidget {
+  const _ChildCard({required this.child, required this.onTap});
+
+  final ParentChild child;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = child.todayStatusLabel;
+    final tone = _toneFor(child.todayStatus);
+    final date = parseDateOnly(child.todayStatusDate);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 14),
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: theme.colorScheme.outlineVariant),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  _Avatar(name: child.fullName),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          child.fullName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          child.classLabel.isEmpty
+                              ? child.schoolName
+                              : '${child.classLabel} - ${child.schoolName}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.chevron_right, color: theme.colorScheme.onSurfaceVariant),
+                ],
+              ),
+              if (label != null) ...[
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: tone.color.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: tone.color.withValues(alpha: 0.25)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(tone.icon, color: tone.color, size: 26),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              label,
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                color: tone.color,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            Text(
+                              date == null ? 'Today' : 'Today - ${formatDateOnly(date)}',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdatesBanner extends StatelessWidget {
+  const _UpdatesBanner({required this.count, required this.onTap});
+
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Material(
+        color: scheme.primaryContainer,
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 22,
+                  backgroundColor: scheme.primary,
+                  child: Icon(Icons.notifications_active_rounded, color: scheme.onPrimary),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        count == 1 ? '1 new update' : '$count new updates',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: scheme.onPrimaryContainer,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Text(
+                        'Arrival and departure times for your children',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onPrimaryContainer.withValues(alpha: 0.85),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: scheme.onPrimaryContainer),
+              ],
             ),
           ),
         ),
